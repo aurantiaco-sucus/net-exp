@@ -1,2 +1,5 @@
 .idea/**
 Cargo.lock
+addr_seg.txt
+inv_addr.txt
+frame.txt
