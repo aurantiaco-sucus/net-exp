@@ -1,13 +1,14 @@
 use std::collections::HashSet;
+use std::fs::File;
 use rand::prelude::*;
 use net_exp_bridge::{Address, Frame, Segment};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
-const VALID_ADDR_CNT: usize = 10000;
-const INVALID_ADDR_CNT: usize = 2500;
-const SEQ_CNT: usize = 100;
-const VALID_FRAME_CNT: usize = 1000_0000;
-const INVALID_FRAME_CNT: usize = 50_0000;
+const VALID_ADDR_CNT: usize = 5000;
+const INVALID_ADDR_CNT: usize = 500;
+const SEQ_CNT: usize = 20;
+const VALID_FRAME_CNT: usize = 200_0000;
+const INVALID_FRAME_CNT: usize = 10_0000;
 
 fn gen_byte_arr<const N: usize>() -> [u8; N] {
     let mut data = [0u8; N];
@@ -101,27 +102,25 @@ fn gen_addr_seg(addr_pool: Vec<Address>, seg_pool: &[Segment]) -> Vec<(Address, 
 }
 
 fn serialize(addr_seg_seq: &[(Address, Segment)], inv_addr_pool: &[Address], frame_seq: &[Frame]) {
-    let addr_seg_file = std::fs::File::create("addr_seg.txt").unwrap();
-    let inv_addr_file = std::fs::File::create("inv_addr.txt").unwrap();
-    let frame_file = std::fs::File::create("frame.txt").unwrap();
-    let mut addr_seg_bw = std::io::BufWriter::new(addr_seg_file);
-    let mut inv_addr_bw = std::io::BufWriter::new(inv_addr_file);
-    let mut frame_bw = std::io::BufWriter::new(frame_file);
+    let addr_seg_rmp = File::create("addr_seg.rmp").unwrap();
+    let inv_addr_rmp = File::create("inv_addr.rmp").unwrap();
+    let frame_rmp = File::create("frame.rmp").unwrap();
+    rmp_serde::encode::write(&mut BufWriter::new(addr_seg_rmp), addr_seg_seq).unwrap();
+    rmp_serde::encode::write(&mut BufWriter::new(inv_addr_rmp), inv_addr_pool).unwrap();
+    rmp_serde::encode::write(&mut BufWriter::new(frame_rmp), frame_seq).unwrap();
+
+    let addr_seg_file = File::create("addr_seg.txt").unwrap();
+    let inv_addr_file = File::create("inv_addr.txt").unwrap();
+    let mut addr_seg_bw = BufWriter::new(addr_seg_file);
+    let mut inv_addr_bw = BufWriter::new(inv_addr_file);
     for (addr, seg) in addr_seg_seq {
         writeln!(addr_seg_bw, "{} {}", addr, seg).unwrap();
     }
     for addr in inv_addr_pool {
         writeln!(inv_addr_bw, "{}", addr).unwrap();
     }
-    for frame in frame_seq {
-        writeln!(frame_bw, "{} {} {}",
-                 frame.src,
-                 frame.dst,
-                 frame.data.iter()
-                     .map(|x| format!("{:02x}", x))
-                     .collect::<Vec<_>>().join("")).unwrap();
-    }
 }
+
 
 fn main() {
     let addr_pool = gen_addr_pool(VALID_ADDR_CNT);

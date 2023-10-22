@@ -1,6 +1,7 @@
 use std::fmt::{Display, Formatter};
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Address {
     pub data: [u8; 4]
@@ -32,7 +33,7 @@ impl TryFrom<&str> for Address {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Segment {
     pub data: [u8; 2]
@@ -60,7 +61,7 @@ impl TryFrom<&str> for Segment {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Frame {
     pub src: Address,
     pub dst: Address,
@@ -80,7 +81,7 @@ impl TryFrom<&str> for Frame {
     type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if value.len() != 39 {
+        if value.len() != 56 {
             return Err(());
         }
         let src = Address::try_from(&value[0..11])?;
