@@ -19,6 +19,3 @@ name = "generate"
 
 [[bin]]
 name = "simulate"
-
-[[bin]]
-name = "analyze"

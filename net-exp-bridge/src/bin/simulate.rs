@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, LinkedList};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::mpsc::{Receiver, Sender};
@@ -52,6 +52,16 @@ pub enum BridgeStatRecord {
     Discard(Frame),
 }
 
+impl BridgeStatRecord {
+    pub fn frame(&self) -> &Frame {
+        match self {
+            BridgeStatRecord::Broadcast(frame) => frame,
+            BridgeStatRecord::Dispatch(frame) => frame,
+            BridgeStatRecord::Discard(frame) => frame,
+        }
+    }
+}
+
 pub struct BridgeStat {
     pub records: Vec<BridgeStatRecord>,
     pub times: Vec<Instant>,
@@ -83,37 +93,30 @@ impl BridgeStat {
     }
 
     fn export_activity_scatter(&self) {
-        let total = {
-            let now = Instant::now();
-            now.duration_since(self.init).as_millis()
-        };
-        let sc_broadcast = self.records.iter()
+        let sc_src = self.records.iter()
             .zip(self.times.iter())
-            .filter(|(x, _)| matches!(x, BridgeStatRecord::Broadcast(_)))
-            .map(|(_, x)| x)
-            .map(|x| x.duration_since(self.init).as_millis() as f64 / total as f64)
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>()
-            .join(" ");
-        let sc_dispatch = self.records.iter()
-            .zip(self.times.iter())
-            .filter(|(x, _)| matches!(x, BridgeStatRecord::Dispatch(_)))
-            .map(|(_, x)| x)
-            .map(|x| x.duration_since(self.init).as_millis() as f64 / total as f64)
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>()
-            .join(" ");
-        let sc_discard = self.records.iter()
-            .zip(self.times.iter())
-            .filter(|(x, _)| matches!(x, BridgeStatRecord::Discard(_)))
-            .map(|(_, x)| x)
-            .map(|x| x.duration_since(self.init).as_millis() as f64 / total as f64)
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>()
-            .join(" ");
-        fs::write("sc_broadcast.txt", sc_broadcast).unwrap();
-        fs::write("sc_dispatch.txt", sc_dispatch).unwrap();
-        fs::write("sc_discard.txt", sc_discard).unwrap();
+            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
+            .map(|(x, y)| (x, y.to_string()));
+
+        let mut sc_broadcast = Vec::new();
+        let mut sc_dispatch = Vec::new();
+        let mut sc_discard = Vec::new();
+
+        for (x, y) in sc_src {
+            match x {
+                BridgeStatRecord::Broadcast(_) => sc_broadcast.push(y),
+                BridgeStatRecord::Dispatch(_) => sc_dispatch.push(y),
+                BridgeStatRecord::Discard(_) => sc_discard.push(y),
+            }
+        }
+
+        let sc_broadcast = sc_broadcast.join(" ");
+        let sc_dispatch = sc_dispatch.join(" ");
+        let sc_discard = sc_discard.join(" ");
+
+        fs::write("sc_broadcast_activity.txt", sc_broadcast).unwrap();
+        fs::write("sc_dispatch_activity.txt", sc_dispatch).unwrap();
+        fs::write("sc_discard_activity.txt", sc_discard).unwrap();
     }
 
     fn export_latency_scatter(&self) {
@@ -121,8 +124,38 @@ impl BridgeStat {
             let now = Instant::now();
             now.duration_since(self.init).as_millis()
         };
-        let broadcasts = self.records.iter()
-
+        let holds = self.records.iter()
+            .zip(self.times.iter())
+            .filter(|(x, _)| matches!(x, BridgeStatRecord::Broadcast(_)))
+            .map(|(x, y)| (x.frame().clone(), y))
+            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
+            .collect::<Vec<_>>();
+        let releases = self.records.iter()
+            .zip(self.times.iter())
+            .filter(|(x, _)| !matches!(x, BridgeStatRecord::Broadcast(_)))
+            .map(|(x, y)| (x.frame().clone(), y))
+            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
+            .collect::<Vec<_>>();
+        let mut latencies = Vec::with_capacity(holds.len());
+        let mut last_i = 0;
+        let pb = indicatif::ProgressBar::new(holds.len() as u64).with_prefix("LATENCY");
+        for (hold, hold_t) in holds {
+            while releases[last_i].1 >= hold_t && last_i > 0 {
+                last_i -= 1;
+            }
+            let (release_i, release_t) = releases[last_i..].iter().enumerate()
+                .find(|(_, (release, _))| release == &hold)
+                .map(|(i, (_, release_t))| (i, release_t))
+                .unwrap();
+            latencies.push((hold_t, release_t - hold_t));
+            last_i = release_i;
+            pb.inc(1);
+        }
+        let latencies = latencies.iter()
+            .map(|(x, y)| format!("{} {}", x, y))
+            .collect::<Vec<String>>()
+            .join("\n");
+        fs::write("sc_latency.txt", latencies).unwrap();
     }
 }
 
@@ -144,6 +177,16 @@ impl BridgePendingStat {
 
     fn len(&self) -> usize {
         self.records.len()
+    }
+
+    fn export_congestion_scatter(&self) {
+        let sc_congestion = self.records.iter()
+            .zip(self.times.iter())
+            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
+            .map(|(x, y)| format!("{} {}", y, x))
+            .collect::<Vec<String>>()
+            .join("\n");
+        fs::write("sc_congestion.txt", sc_congestion).unwrap();
     }
 }
 
@@ -193,6 +236,9 @@ fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
             }
             Event::Shutdown => {
                 info!(target: "bridge", "Received shutdown signal.");
+                stat.export_activity_scatter();
+                stat.export_latency_scatter();
+                pending_stat.export_congestion_scatter();
                 break;
             }
         }
@@ -229,35 +275,9 @@ fn distribute(frame_seq: Vec<Frame>, dur_sec: usize, dist: fn(f64) -> f64) -> Ve
     buckets
 }
 
-pub struct OrchestratorStat {
-    pub records: Vec<Frame>,
-    pub times: Vec<Instant>,
-    pub init: Instant,
-}
-
-impl OrchestratorStat {
-    fn new() -> Self {
-        OrchestratorStat { records: Vec::new(), times: Vec::new(), init: Instant::now() }
-    }
-
-    fn record(&mut self, frame: Frame) {
-        self.records.push(frame);
-        self.times.push(Instant::now());
-    }
-
-    fn len(&self) -> usize {
-        self.records.len()
-    }
-
-    fn export() {
-
-    }
-}
-
 fn orchestrator(frame_seq: Vec<Frame>, te: Sender<Event>) {
     info!(target: "orchestrator", "Orchestrator started.");
     let frame_seq = distribute(frame_seq, 10, half_circle_dist_cdf);
-    let mut stat = OrchestratorStat::new();
     let begin = Instant::now();
     let mut last = 0;
     let mut last_t = Instant::now();
@@ -270,7 +290,6 @@ fn orchestrator(frame_seq: Vec<Frame>, te: Sender<Event>) {
             for buckets in frame_seq[last..].iter() {
                 for frame in buckets {
                     te.send(Event::Request(frame.clone())).unwrap();
-                    stat.record(frame.clone());
                 }
             }
             break;
@@ -279,7 +298,6 @@ fn orchestrator(frame_seq: Vec<Frame>, te: Sender<Event>) {
             for buckets in frame_seq[last..cur as usize].iter() {
                 for frame in buckets {
                     te.send(Event::Request(frame.clone())).unwrap();
-                    stat.record(frame.clone());
                     count += 1;
                 }
             }
