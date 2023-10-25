@@ -1,19 +1,20 @@
 use std::collections::HashSet;
 use std::fs::File;
 use rand::prelude::*;
-use net_exp_bridge::{Address, Frame, Segment};
+use net_exp_bridge::{Address, Frame, FrameData, Segment};
 use std::io::{BufWriter, Write};
+use log::info;
 
 /// Count of valid addresses
-const VALID_ADDR_CNT: usize = 10000;
+const VALID_ADDR_CNT: usize = 5000;
 /// Count of invalid addresses
-const INVALID_ADDR_CNT: usize = 1000;
+const INVALID_ADDR_CNT: usize = 100;
 /// Count of segments
-const SEG_CNT: usize = 50;
+const SEG_CNT: usize = 100;
 /// Count of valid frames
 const VALID_FRAME_CNT: usize = 1000_0000;
 /// Count of invalid frames
-const INVALID_FRAME_CNT: usize = 50_0000;
+const INVALID_FRAME_CNT: usize = 10_0000;
 
 /// Generate random byte array of specified size with `fastrand` API.
 fn gen_byte_arr<const N: usize>() -> [u8; N] {
@@ -63,7 +64,7 @@ fn gen_seg_pool(count: usize) -> HashSet<Segment> {
 }
 
 /// Generate frame data.
-fn gen_data() -> [u8; 16] {
+fn gen_data() -> FrameData {
     gen_byte_arr()
 }
 
@@ -134,12 +135,14 @@ fn serialize(addr_seg_seq: &[(Address, Segment)], inv_addr_pool: &[Address], fra
 
 
 fn main() {
+    env_logger::init();
+
     // create pools
-    println!("Address pool...");
+    info!("Address pool...");
     let addr_pool = gen_addr_pool(VALID_ADDR_CNT);
-    println!("Invalid address pool...");
+    info!("Invalid address pool...");
     let inv_addr_pool = gen_addr_pool(INVALID_ADDR_CNT);
-    println!("Segment pool...");
+    info!("Segment pool...");
     let seg_pool = gen_seg_pool(SEG_CNT);
 
     let addr_pool = addr_pool.into_iter().collect::<Vec<_>>();
@@ -147,7 +150,7 @@ fn main() {
     let seg_pool = seg_pool.into_iter().collect::<Vec<_>>();
 
     // fabricate frames
-    println!("Frame sequence...");
+    info!("Frame sequence...");
     let frame_seq = {
         let mut frame_seq = gen_frame_seq(
             &addr_pool, &seg_pool, &addr_pool, VALID_FRAME_CNT);
@@ -160,6 +163,6 @@ fn main() {
 
     // generate segment mapping
     let addr_seg_seq = gen_addr_seg(addr_pool, &seg_pool);
-    println!("Serialization...");
+    info!("Serialization...");
     serialize(&addr_seg_seq, &inv_addr_pool, &frame_seq);
 }

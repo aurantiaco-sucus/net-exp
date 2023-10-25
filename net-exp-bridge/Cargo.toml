@@ -13,6 +13,7 @@ indicatif = "0.17.7"
 rand = "0.8.5"
 serde = { version = "1.0.189", features = ["derive"] }
 rmp-serde = "1.1.2"
+serde-pickle = "1.1.1"
 
 [[bin]]
 name = "generate"

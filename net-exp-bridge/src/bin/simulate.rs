@@ -1,13 +1,15 @@
-use std::collections::{BTreeMap, HashMap, LinkedList};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use std::sync::mpsc::{Receiver, Sender};
 use std::{fs, thread};
 use std::f64::consts::PI;
 use std::time::{Duration, Instant};
 use log::info;
+use serde_pickle::SerOptions;
 use net_exp_bridge::{Address, Frame, Segment};
-use std::io::Write;
+
+const ELAPSE_SEC: usize = 10;
 
 /// Event that bridge receives.
 enum Event {
@@ -115,28 +117,27 @@ impl BridgeStat {
     fn export_activity_scatter(&self) {
         let sc_src = self.records.iter()
             .zip(self.times.iter())
-            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
-            .map(|(x, y)| (x, y.to_string()));
+            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()));
 
-        let mut sc_broadcast = Vec::new();
-        let mut sc_dispatch = Vec::new();
-        let mut sc_discard = Vec::new();
+        let mut sc_broadcast = Vec::with_capacity(self.records.len());
+        let mut sc_dispatch = Vec::with_capacity(self.records.len());
+        let mut sc_discard = Vec::with_capacity(self.records.len());
 
         for (x, y) in sc_src {
             match x {
-                BridgeStatRecord::Broadcast(_) => sc_broadcast.push(y),
-                BridgeStatRecord::Dispatch(_) => sc_dispatch.push(y),
-                BridgeStatRecord::Discard(_) => sc_discard.push(y),
+                BridgeStatRecord::Broadcast(_) => sc_broadcast.push(y as i64),
+                BridgeStatRecord::Dispatch(_) => sc_dispatch.push(y as i64),
+                BridgeStatRecord::Discard(_) => sc_discard.push(y as i64),
             }
         }
 
-        let sc_broadcast = sc_broadcast.join(" ");
-        let sc_dispatch = sc_dispatch.join(" ");
-        let sc_discard = sc_discard.join(" ");
+        let mut w_broadcast = BufWriter::new(File::create("sc_broadcast_activity.pkl").unwrap());
+        let mut w_dispatch = BufWriter::new(File::create("sc_dispatch_activity.pkl").unwrap());
+        let mut w_discard = BufWriter::new(File::create("sc_discard_activity.pkl").unwrap());
 
-        fs::write("sc_broadcast_activity.txt", sc_broadcast).unwrap();
-        fs::write("sc_dispatch_activity.txt", sc_dispatch).unwrap();
-        fs::write("sc_discard_activity.txt", sc_discard).unwrap();
+        serde_pickle::to_writer(&mut w_broadcast, &sc_broadcast, SerOptions::default()).unwrap();
+        serde_pickle::to_writer(&mut w_dispatch, &sc_dispatch, SerOptions::default()).unwrap();
+        serde_pickle::to_writer(&mut w_discard, &sc_discard, SerOptions::default()).unwrap();
     }
 
     /// Export scatter of latencies of frames broadcast.
@@ -154,15 +155,12 @@ impl BridgeStat {
                         continue
                     };
                     let lat = t - begin;
-                    latencies.push((begin, lat));
+                    latencies.push(vec![begin as i64, lat as i64]);
                 }
             }
         }
-        let latencies = latencies.iter()
-            .map(|(x, y)| format!("{} {}", x, y))
-            .collect::<Vec<String>>()
-            .join("\n");
-        fs::write("sc_latency.txt", latencies).unwrap();
+        serde_pickle::to_writer(&mut BufWriter::new(File::create("sc_latency.pkl").unwrap()),
+                                &latencies, SerOptions::default()).unwrap();
     }
 }
 
@@ -192,10 +190,10 @@ impl BridgePendingStat {
         let sc_congestion = self.records.iter()
             .zip(self.times.iter())
             .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
-            .map(|(x, y)| format!("{} {}", y, x))
-            .collect::<Vec<String>>()
-            .join("\n");
-        fs::write("sc_congestion.txt", sc_congestion).unwrap();
+            .map(|(x, y)| vec![y as i64, *x as i64])
+            .collect::<Vec<_>>();
+        serde_pickle::to_writer(&mut BufWriter::new(File::create("sc_congestion.pkl").unwrap()),
+                                &sc_congestion, SerOptions::default()).unwrap();
     }
 }
 
@@ -224,19 +222,17 @@ fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
                     tc.send(Command::Dispatch(frame, *segment)).unwrap();
                     req_cnt += 1;
                     dp_cnt += 1;
+                } else if !pending.exist_addr(&frame.dst) {
+                    // broadcast if no frames of same source are waiting
+                    stat.broadcast(frame.clone());
+                    tc.send(Command::Broadcast(frame.dst)).unwrap(); // <- actual command
+                    pending_stat.rec(pending.len());
+                    pending.hold(frame);
+                    b_cnt += 1;
                 } else {
-                    if !pending.exist_addr(&frame.dst) {
-                        // broadcast if no frames of same source are waiting
-                        stat.broadcast(frame.clone());
-                        tc.send(Command::Broadcast(frame.dst)).unwrap(); // <- actual command
-                        pending_stat.rec(pending.len());
-                        pending.hold(frame);
-                        b_cnt += 1;
-                    } else {
-                        stat.broadcast(frame.clone());
-                        pending_stat.rec(pending.len());
-                        pending.hold(frame);
-                    }
+                    stat.broadcast(frame.clone());
+                    pending_stat.rec(pending.len());
+                    pending.hold(frame);
                 }
             }
             Event::Success(address, segment) => {
@@ -310,7 +306,7 @@ fn distribute(frame_seq: Vec<Frame>, dur_sec: usize, dist: fn(f64) -> f64) -> Ve
 /// Orchestration service that send frames to the bridge with distributed frame sequence.
 fn orchestrator(frame_seq: Vec<Frame>, te: Sender<Event>) {
     info!(target: "orchestrator", "Orchestrator started.");
-    let frame_seq = distribute(frame_seq, 10, half_circle_dist_cdf);
+    let frame_seq = distribute(frame_seq, ELAPSE_SEC, half_circle_dist_cdf);
     let begin = Instant::now();
     let mut last = 0;
     let mut last_t = Instant::now();

@@ -61,12 +61,14 @@ impl TryFrom<&str> for Segment {
     }
 }
 
+pub type FrameData = [u8; 4];
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Frame {
     pub src: Address,
     pub src_seg: Segment,
     pub dst: Address,
-    pub data: [u8; 16]
+    pub data: FrameData
 }
 
 impl Display for Frame {
@@ -79,12 +81,12 @@ impl TryFrom<&str> for Frame {
     type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let mut seg = value.trim().split(" ");
+        let mut seg = value.trim().split(' ');
         let src = if let Some(val) = seg.next() { val } else { return Err(()) };
         let src_seg = if let Some(val) = seg.next() { val } else { return Err(()) };
         let dst = if let Some(val) = seg.next() { val } else { return Err(()) };
         let data_s = if let Some(val) = seg.next() { val } else { return Err(()) };
-        let mut data = [0; 16];
+        let mut data = FrameData::default();
         for i in 0..16 {
             data[i] = u8::from_str_radix(&data_s[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
         }

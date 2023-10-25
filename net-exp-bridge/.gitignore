@@ -7,3 +7,4 @@ addr_seg.rmp
 inv_addr.rmp
 frame.rmp
 sc*.txt
+*.pkl
