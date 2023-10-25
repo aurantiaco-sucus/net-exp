@@ -64,16 +64,14 @@ impl TryFrom<&str> for Segment {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Frame {
     pub src: Address,
+    pub src_seg: Segment,
     pub dst: Address,
     pub data: [u8; 16]
 }
 
 impl Display for Frame {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let src = self.src;
-        let dst = self.dst;
-        let data = self.data;
-        write!(f, "{} {} {:02x?}", src, dst, data)
+        write!(f, "{} {} {} {:02x?}", self.src, self.src_seg, self.dst, self.data)
     }
 }
 
@@ -81,15 +79,20 @@ impl TryFrom<&str> for Frame {
     type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if value.len() != 56 {
-            return Err(());
-        }
-        let src = Address::try_from(&value[0..11])?;
-        let dst = Address::try_from(&value[12..23])?;
+        let mut seg = value.trim().split(" ");
+        let src = if let Some(val) = seg.next() { val } else { return Err(()) };
+        let src_seg = if let Some(val) = seg.next() { val } else { return Err(()) };
+        let dst = if let Some(val) = seg.next() { val } else { return Err(()) };
+        let data_s = if let Some(val) = seg.next() { val } else { return Err(()) };
         let mut data = [0; 16];
         for i in 0..16 {
-            data[i] = u8::from_str_radix(&value[24 + i * 2..26 + i * 2], 16).map_err(|_| ())?;
+            data[i] = u8::from_str_radix(&data_s[i * 2..i * 2 + 2], 16).map_err(|_| ())?;
         }
-        Ok(Frame { src, dst, data })
+        Ok(Frame {
+            src: src.try_into()?,
+            src_seg: src_seg.try_into()?,
+            dst: dst.try_into()?,
+            data
+        })
     }
 }

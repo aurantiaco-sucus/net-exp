@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, LinkedList};
+use std::collections::{BTreeMap, HashMap, LinkedList};
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::mpsc::{Receiver, Sender};
@@ -9,19 +9,29 @@ use log::info;
 use net_exp_bridge::{Address, Frame, Segment};
 use std::io::Write;
 
+/// Event that bridge receives.
 enum Event {
+    /// Incoming request of routing a frame.
     Request(Frame),
+    /// Found segment that accept an address.
     Success(Address, Segment),
+    /// No segment accepts an address.
     Failure(Address),
+    /// Simulation finishing and the bridge should be exiting.
     Shutdown,
 }
 
+/// Command that bridge emits.
 enum Command {
+    /// Broadcast an address to segments
     Broadcast(Address),
+    /// Dispatch a frame to a segment
     Dispatch(Frame, Segment),
+    /// Discard a frame
     Discard(Frame),
 }
 
+/// Waiting list of frames.
 struct Holder {
     map: BTreeMap<Address, Vec<Frame>>
 }
@@ -31,12 +41,19 @@ impl Holder {
         Holder { map: BTreeMap::new() }
     }
 
+    /// Check if there exist frames of a specific address.
+    fn exist_addr(&self, addr: &Address) -> bool {
+        self.map.contains_key(addr)
+    }
+
+    /// Hold a frame.
     fn hold(&mut self, frame: Frame) {
         let frames = self.map.entry(frame.dst)
             .or_insert_with(Vec::new);
         frames.push(frame);
     }
 
+    /// Release frames of the same address.
     fn release(&mut self, addr: Address) -> Vec<Frame> {
         self.map.remove(&addr).unwrap_or_default()
     }
@@ -46,6 +63,7 @@ impl Holder {
     }
 }
 
+/// Statistics of bridge
 pub enum BridgeStatRecord {
     Broadcast(Frame),
     Dispatch(Frame),
@@ -62,6 +80,7 @@ impl BridgeStatRecord {
     }
 }
 
+/// Record of bridge statistics.
 pub struct BridgeStat {
     pub records: Vec<BridgeStatRecord>,
     pub times: Vec<Instant>,
@@ -92,6 +111,7 @@ impl BridgeStat {
         self.records.len()
     }
 
+    /// Export scatter of different types of activities.
     fn export_activity_scatter(&self) {
         let sc_src = self.records.iter()
             .zip(self.times.iter())
@@ -119,37 +139,24 @@ impl BridgeStat {
         fs::write("sc_discard_activity.txt", sc_discard).unwrap();
     }
 
+    /// Export scatter of latencies of frames broadcast.
     fn export_latency_scatter(&self) {
-        let total = {
-            let now = Instant::now();
-            now.duration_since(self.init).as_millis()
-        };
-        let holds = self.records.iter()
-            .zip(self.times.iter())
-            .filter(|(x, _)| matches!(x, BridgeStatRecord::Broadcast(_)))
-            .map(|(x, y)| (x.frame().clone(), y))
-            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
-            .collect::<Vec<_>>();
-        let releases = self.records.iter()
-            .zip(self.times.iter())
-            .filter(|(x, _)| !matches!(x, BridgeStatRecord::Broadcast(_)))
-            .map(|(x, y)| (x.frame().clone(), y))
-            .map(|(x, y)| (x, y.duration_since(self.init).as_micros()))
-            .collect::<Vec<_>>();
-        let mut latencies = Vec::with_capacity(holds.len());
-        let mut last_i = 0;
-        let pb = indicatif::ProgressBar::new(holds.len() as u64).with_prefix("LATENCY");
-        for (hold, hold_t) in holds {
-            while releases[last_i].1 >= hold_t && last_i > 0 {
-                last_i -= 1;
+        let mut hold_map = HashMap::<Frame, u128>::new();
+        let mut latencies = Vec::with_capacity(self.records.len());
+        for (rec, t) in self.records.iter().zip(self.times.iter()) {
+            let t = t.duration_since(self.init).as_micros();
+            match rec {
+                BridgeStatRecord::Broadcast(frame) => {
+                    hold_map.insert(frame.clone(), t);
+                }
+                BridgeStatRecord::Dispatch(frame) | BridgeStatRecord::Discard(frame) => {
+                    let begin = if let Some(val) = hold_map.remove(&frame) { val } else {
+                        continue
+                    };
+                    let lat = t - begin;
+                    latencies.push((begin, lat));
+                }
             }
-            let (release_i, release_t) = releases[last_i..].iter().enumerate()
-                .find(|(_, (release, _))| release == &hold)
-                .map(|(i, (_, release_t))| (i, release_t))
-                .unwrap();
-            latencies.push((hold_t, release_t - hold_t));
-            last_i = release_i;
-            pb.inc(1);
         }
         let latencies = latencies.iter()
             .map(|(x, y)| format!("{} {}", x, y))
@@ -159,6 +166,7 @@ impl BridgeStat {
     }
 }
 
+/// Statistics of pending frames of bridge.
 pub struct BridgePendingStat {
     pub records: Vec<usize>,
     pub times: Vec<Instant>,
@@ -179,6 +187,7 @@ impl BridgePendingStat {
         self.records.len()
     }
 
+    /// Export scatter of congestion, the changing pressure of waiting list.
     fn export_congestion_scatter(&self) {
         let sc_congestion = self.records.iter()
             .zip(self.times.iter())
@@ -190,6 +199,7 @@ impl BridgePendingStat {
     }
 }
 
+/// Launch network bridge
 fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
     info!(target: "bridge", "Bridge started.");
     let mut mapping = BTreeMap::new();
@@ -201,25 +211,39 @@ fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
     let mut dp_cnt = 0;
     let mut dc_cnt = 0;
     let mut last_t = Instant::now();
-    while let Ok(event) = re.recv() {
+    while let Ok(event) = re.recv() { // receive an event
         match event {
             Event::Request(frame) => {
+                if mapping.get(&frame.src).is_none() {
+                    // correlate the source address with incoming segment
+                    mapping.insert(frame.src, frame.src_seg);
+                }
                 if let Some(segment) = mapping.get(&frame.dst) {
+                    // dispatch if source found in mapping
                     stat.dispatch(frame.clone());
                     tc.send(Command::Dispatch(frame, *segment)).unwrap();
                     req_cnt += 1;
                     dp_cnt += 1;
                 } else {
-                    stat.broadcast(frame.clone());
-                    tc.send(Command::Broadcast(frame.dst)).unwrap();
-                    pending_stat.rec(pending.len());
-                    pending.hold(frame);
-                    b_cnt += 1;
+                    if !pending.exist_addr(&frame.dst) {
+                        // broadcast if no frames of same source are waiting
+                        stat.broadcast(frame.clone());
+                        tc.send(Command::Broadcast(frame.dst)).unwrap(); // <- actual command
+                        pending_stat.rec(pending.len());
+                        pending.hold(frame);
+                        b_cnt += 1;
+                    } else {
+                        stat.broadcast(frame.clone());
+                        pending_stat.rec(pending.len());
+                        pending.hold(frame);
+                    }
                 }
             }
             Event::Success(address, segment) => {
+                // update the mapping
                 mapping.insert(address, segment);
                 for frame in pending.release(address) {
+                    // dispatch all frames with the same segment
                     stat.dispatch(frame.clone());
                     tc.send(Command::Dispatch(frame, segment)).unwrap();
                     dp_cnt += 1;
@@ -228,6 +252,7 @@ fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
             }
             Event::Failure(address) => {
                 for frame in pending.release(address) {
+                    // discard them all
                     stat.discard(frame.clone());
                     tc.send(Command::Discard(frame)).unwrap();
                     dc_cnt += 1;
@@ -236,6 +261,7 @@ fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
             }
             Event::Shutdown => {
                 info!(target: "bridge", "Received shutdown signal.");
+                // export statistics
                 stat.export_activity_scatter();
                 stat.export_latency_scatter();
                 pending_stat.export_congestion_scatter();
@@ -255,11 +281,16 @@ fn bridge(tc: Sender<Command>, re: Receiver<Event>) {
     info!(target: "bridge", "Bridge exiting.");
 }
 
+/// Cumulative distribution function of the distribution of "half circle".
+///
+/// Its PDF (Probability Density Function)'s graph will look like one top half of a circle fitted
+/// in the square of x from 0 to 1 and y from 0 to 1.
 fn half_circle_dist_cdf(x: f64) -> f64 {
     let x = x * PI - PI / 2.0;
     (x.sin() + 1.0) / 2.0
 }
 
+/// Distribute the frames per milliseconds in specified duration with a distribution function.
 fn distribute(frame_seq: Vec<Frame>, dur_sec: usize, dist: fn(f64) -> f64) -> Vec<Vec<Frame>> {
     let mut buckets = vec![Vec::new(); dur_sec * 1000];
     let mut last_pos = 0;
@@ -269,12 +300,14 @@ fn distribute(frame_seq: Vec<Frame>, dur_sec: usize, dist: fn(f64) -> f64) -> Ve
         vec.extend_from_slice(&frame_seq[last_pos..pos]);
         last_pos = pos;
     }
+    // collect remaining bits if any
     if last_pos < frame_seq.len() {
         buckets.last_mut().unwrap().extend_from_slice(&frame_seq[last_pos..]);
     }
     buckets
 }
 
+/// Orchestration service that send frames to the bridge with distributed frame sequence.
 fn orchestrator(frame_seq: Vec<Frame>, te: Sender<Event>) {
     info!(target: "orchestrator", "Orchestrator started.");
     let frame_seq = distribute(frame_seq, 10, half_circle_dist_cdf);
@@ -313,6 +346,7 @@ fn orchestrator(frame_seq: Vec<Frame>, te: Sender<Event>) {
     info!(target: "orchestrator", "Orchestrator exiting.");
 }
 
+/// Meter to count facility statistics within some time.
 struct FacilityMeter {
     s_cnt: usize,
     f_cnt: usize,
@@ -351,6 +385,7 @@ impl FacilityMeter {
     }
 }
 
+/// Facilitation service that handle commands from the bridge.
 fn facility(count: usize, mapping: BTreeMap<Address, Segment>, te: Sender<Event>, rc: Receiver<Command>) {
     info!(target: "facility", "Facility started.");
     let mut cur_n = 0;
@@ -388,12 +423,14 @@ fn facility(count: usize, mapping: BTreeMap<Address, Segment>, te: Sender<Event>
     info!(target: "facility", "Facility exiting.");
 }
 
+/// Load segment mapping from disk.
 fn load_mapping() -> BTreeMap<Address, Segment> {
     let addr_seg = BufReader::new(File::open("addr_seg.rmp").unwrap());
     let addr_seg: Vec<(Address, Segment)> = rmp_serde::from_read(addr_seg).unwrap();
     BTreeMap::from_iter(addr_seg)
 }
 
+/// Load generated frames from disk.
 fn load_frames() -> Vec<Frame> {
     let frame = BufReader::new(File::open("frame.rmp").unwrap());
     rmp_serde::from_read(frame).unwrap()
