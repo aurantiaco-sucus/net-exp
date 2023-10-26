@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 tqdm = "0.6.0"
+rayon = "1.8.0"

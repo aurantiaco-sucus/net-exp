@@ -1,32 +1,54 @@
 use std::env::args;
 use std::fs::File;
-use std::io::Read;
-use tqdm::tqdm;
+use std::io::{BufReader, Read};
+use rayon::prelude::*;
 
-const BUF_INITIAL_SIZE: usize = 16384;
+fn read_all(path: &str) -> Vec<u16> {
+    let file = File::open(path).unwrap();
+    let size = file.metadata().unwrap().len();
+    let mut file = BufReader::new(file);
+    let mut fc = Vec::with_capacity((size / 2) as usize);
+    let mut buf = [0; 2];
+    while let Ok(n) = file.read(&mut buf) {
+        if n == 0 {
+            break
+        }
+        if n == 1 {
+            buf[1] = 0;
+        }
+        fc.push(u16::from_be_bytes(buf));
+    }
+    fc
+}
+
+fn checksum(data: &[u16]) -> u16 {
+    let mut cur = checksum_pass(data);
+    while cur.len() > 1 {
+        cur = checksum_pass(&cur);
+    }
+    cur[0]
+}
+
+fn checksum_pass(data: &[u16]) -> Vec<u16> {
+    data.chunks(2)
+        .par_bridge()
+        .map(|x| {
+            if x.len() == 1 {
+                x[0]
+            } else {
+                let (mut sum, of) = x[0].overflowing_add(x[1]);
+                if of {
+                    sum += 1;
+                }
+                sum
+            }
+        }).collect::<Vec<_>>()
+}
 
 fn main() {
     let file = args().nth(1)
         .expect("No input file specified!");
-    let mut file = File::open(file)
-        .expect("Can't open the file!");
-    let mut data = Vec::with_capacity(BUF_INITIAL_SIZE);
-    file.read_to_end(&mut data)
-        .expect("Error reading the file!");
-    if data.len() == 0 {
-        panic!("File is empty!");
-    }
-    if data.len() % 2 == 1 {
-        data.push(0);
-    }
-    let mut sum: u16 = 0;
-    let mut overflow = false;
-    for word in tqdm(data.chunks_exact(2)) {
-        let word = u16::from_be_bytes(word.try_into().unwrap());
-        (sum, overflow) = sum.overflowing_add(word);
-        if overflow {
-            sum += 1;
-        }
-    }
+    let data = read_all(&file);
+    let sum = checksum(&data);
     println!("{sum:x}");
 }
